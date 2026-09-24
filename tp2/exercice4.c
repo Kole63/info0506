@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -6,11 +8,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
 
 typedef struct {
     int x;
     int h;
 } Couple;
+
+static volatile sig_atomic_t arret_demande = 0;
+
+static void traiter_signal(int signal_recu) {
+    (void) signal_recu;
+    arret_demande = 1;
+}
 
 static int lancer_piece(void) {
     int faces = 0;
@@ -36,7 +46,24 @@ int main(int argc, char *argv[]) {
     }
     int n = (int) valeur;
 
+    struct sigaction action = {0};
+    action.sa_handler = traiter_signal;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, NULL) == -1) {
+        perror("sigaction");
+        return EXIT_FAILURE;
+    }
+
+    sigset_t masque_signal;
+    sigemptyset(&masque_signal);
+    sigaddset(&masque_signal, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &masque_signal, NULL) == -1) {
+        perror("sigprocmask");
+        return EXIT_FAILURE;
+    }
+
     int tubes[n][2];
+    pid_t fils[n];
     for (int i = 0; i < n; i++) {
         if (pipe(tubes[i]) == -1) {
             perror("pipe");
@@ -58,6 +85,11 @@ int main(int argc, char *argv[]) {
             int actif = 1;
             int tour = 1;
 
+            if (sigprocmask(SIG_UNBLOCK, &masque_signal, NULL) == -1) {
+                perror("sigprocmask");
+                exit(EXIT_FAILURE);
+            }
+
             srand((unsigned int) (time(NULL) ^ getpid()));
 
             for (int j = 0; j < n; j++) {
@@ -78,23 +110,37 @@ int main(int argc, char *argv[]) {
                 }
 
                 if (write(tubes[i][1], &couple, sizeof(couple)) != sizeof(couple)) {
+                    if (arret_demande) {
+                        break;
+                    }
                     perror("write");
-                    _exit(EXIT_FAILURE);
+                    exit(EXIT_FAILURE);
                 }
 
                 for (int j = 0; j < n; j++) {
-                    if (read(tubes[precedent][0], &recu, sizeof(recu)) != sizeof(recu)) {
+                    ssize_t lus = read(tubes[precedent][0], &recu, sizeof(recu));
+                    if (lus != sizeof(recu)) {
+                        if (arret_demande) {
+                            break;
+                        }
                         perror("read");
-                        _exit(EXIT_FAILURE);
+                        exit(EXIT_FAILURE);
                     }
                     valeurs[j] = recu.x;
                     if (recu.h < n) {
                         recu.h++;
                         if (write(tubes[i][1], &recu, sizeof(recu)) != sizeof(recu)) {
+                            if (arret_demande) {
+                                break;
+                            }
                             perror("write");
-                            _exit(EXIT_FAILURE);
+                            exit(EXIT_FAILURE);
                         }
                     }
+                }
+
+                if (arret_demande) {
+                    break;
                 }
 
                 int maximum = -1;
@@ -111,6 +157,9 @@ int main(int argc, char *argv[]) {
                 if (actif && couple.x == maximum && nombre_maximum == 1) {
                     printf("Fils %d est le vainqueur avec X=%d\n", i + 1, couple.x);
                     fflush(stdout);
+                    if (kill(getppid(), SIGUSR1) == -1) {
+                        perror("kill");
+                    }
                     break;
                 }
                 if (nombre_maximum == 1) {
@@ -126,18 +175,41 @@ int main(int argc, char *argv[]) {
 
             if (close(tubes[i][1]) == -1 || close(tubes[precedent][0]) == -1) {
                 perror("close");
-                _exit(EXIT_FAILURE);
+                exit(EXIT_FAILURE);
             }
-            _exit(EXIT_SUCCESS);
+            exit(EXIT_SUCCESS);
         }
+        fils[i] = pid;
+    }
+
+    if (sigprocmask(SIG_UNBLOCK, &masque_signal, NULL) == -1) {
+        perror("sigprocmask");
+        return EXIT_FAILURE;
     }
 
     for (int i = 0; i < n; i++) {
         close(tubes[i][0]);
         close(tubes[i][1]);
     }
+    if (arret_demande) {
+        for (int i = 0; i < n; i++) {
+            kill(fils[i], SIGUSR1);
+        }
+        arret_demande = 0;
+    }
     for (int i = 0; i < n; i++) {
-        wait(NULL);
+        while (wait(NULL) == -1) {
+            if (errno != EINTR) {
+                perror("wait");
+                return EXIT_FAILURE;
+            }
+            if (arret_demande) {
+                for (int j = 0; j < n; j++) {
+                    kill(fils[j], SIGUSR1);
+                }
+                arret_demande = 0;
+            }
+        }
     }
     return EXIT_SUCCESS;
 }
