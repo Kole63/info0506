@@ -1,0 +1,16 @@
+trainterC:
+    Envoi(nomfichier)
+    
+    tant que taille != 0
+
+        Recevoir contenu par bufferisation c-a-d taille buffer puis buffer
+        Enregistrer buffer
+
+trainterS: 
+    recevoir(nomfichier)
+
+    ouvrir(fichier)
+
+    tant que pas à la fin fichier
+        lire fichier bifferisé
+        ecrire contenu sur socket
